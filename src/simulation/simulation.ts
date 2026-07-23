@@ -9,10 +9,12 @@
  * right-skewed lognormal distribution (see service.ts) rather than being
  * constant, because the slow tail of service is what actually builds queues.
  *
- * This is an EVENT-DRIVEN simulation, not a frame-by-frame animation. We never
- * step time forward by a fixed dt to "move" passengers. Instead we reason
- * directly about the two events that matter — an arrival and a service
- * completion — and compute exact timestamps for each passenger.
+ * This is an EVENT-DRIVEN simulation, not a frame-by-frame animation. Time is
+ * never advanced by a fixed dt; instead the loop maintains an event list of the
+ * only two things that change system state — passenger arrivals and service
+ * completions — and jumps directly from one event to the next. Between events
+ * nothing happens, so every timestamp is exact rather than rounded to a frame,
+ * and a quiet stretch costs nothing to simulate.
  *
  * The engine is intentionally decoupled from React and has no I/O, so it is
  * fully unit-testable on its own.
@@ -39,6 +41,13 @@ export interface SimConfig {
   serviceStdMinutes: number;
   /** Seed for reproducible runs. */
   seed: number;
+  /**
+   * Hard cap on simulated passengers. Extreme volume settings could otherwise
+   * generate an unbounded number of arrivals and freeze the browser tab; the
+   * cap keeps the UI responsive, and the result carries a flag so the UI can
+   * tell the user the run was truncated.
+   */
+  maxPassengers: number;
 }
 
 /** One passenger's full journey through the checkpoint. */
@@ -71,7 +80,16 @@ export interface TimeSeriesPoint {
 }
 
 export interface SimSummary {
+  /** Every passenger who arrived during the window. */
+  totalArrivals: number;
+  /** Passengers whose screening FINISHED within the window. */
   totalProcessed: number;
+  /**
+   * Passengers still queued or mid-screening when the window closed. By
+   * conservation, totalProcessed + stillInSystemAtHorizon = totalArrivals —
+   * the model neither creates nor loses passengers, which the tests assert.
+   */
+  stillInSystemAtHorizon: number;
   avgWait: number;
   /**
    * 95th-percentile wait. WHY THIS MATTERS MORE THAN THE AVERAGE: operations are
@@ -92,23 +110,34 @@ export interface SimResult {
   passengers: Passenger[];
   timeSeries: TimeSeriesPoint[];
   summary: SimSummary;
+  /** True if the run hit config.maxPassengers and arrivals were truncated. */
+  capped: boolean;
 }
 
 /**
- * Core queue mechanics, decoupled from arrival/service *generation* so it can be
- * driven by known inputs in unit tests.
+ * Core discrete-event loop, decoupled from arrival/service *generation* so it
+ * can be driven by known inputs in unit tests.
  *
  * Given passenger arrival times (must be sorted ascending) and their service
- * durations, assign each passenger to a lane under FIFO discipline with the
- * "next free lane" rule and return the fully-resolved passenger records.
+ * durations, run the single-queue / multi-lane checkpoint and return the
+ * fully-resolved passenger records.
  *
- * ALGORITHM: keep the time each lane becomes free. For each passenger in arrival
- * order, choose the lane that frees earliest; the passenger begins service at
- * max(their arrival, that lane's free time). This is exactly the event-driven
- * behavior of a single queue feeding c servers — the "events" (arrivals and
- * completions) are encoded in the arrival list and the per-lane free times.
- * Lanes are few, so a linear scan for the earliest-free lane is simplest and
- * unambiguously correct.
+ * EVENT LIST: two event types drive the system.
+ *   - Arrival events are known upfront: the sorted `arrivals` array IS the
+ *     arrival half of the event list, consumed through an index cursor.
+ *   - Service-completion events are scheduled when a passenger starts service.
+ *     At most one screening is in progress per lane, so there are never more
+ *     than `numLanes` pending completions — a per-lane completion-time array
+ *     scanned for its minimum is the simplest correct priority structure here
+ *     (a heap would buy nothing at this size).
+ *
+ * The loop repeatedly takes whichever pending event is earliest and applies it:
+ *   - completion: the lane frees; if anyone is queued, the head of the shared
+ *     FIFO queue starts service on that lane at the completion timestamp.
+ *   - arrival: if a lane is idle (and nobody is queued ahead), service starts
+ *     immediately; otherwise the passenger joins the tail of the queue.
+ * Completions are processed before arrivals at identical timestamps, and lane
+ * ties resolve to the lowest lane index, so runs are fully deterministic.
  */
 export function simulateQueue(
   arrivals: number[],
@@ -120,35 +149,66 @@ export function simulateQueue(
     throw new Error('arrivals and serviceTimes must have equal length');
   }
 
-  // laneFreeAt[k] = time at which lane k next becomes available.
-  const laneFreeAt = new Array<number>(numLanes).fill(0);
-  const passengers: Passenger[] = [];
+  const n = arrivals.length;
+  const passengers = new Array<Passenger>(n);
 
-  for (let i = 0; i < arrivals.length; i++) {
-    const arrival = arrivals[i];
+  // Pending completion events: completionAt[k] = when lane k finishes its
+  // current passenger, or Infinity if lane k is idle.
+  const completionAt = new Array<number>(numLanes).fill(Infinity);
+  let lanesBusy = 0;
 
-    // Pick the lane that becomes free earliest (ties resolved by lane index,
-    // so behavior is deterministic).
-    let lane = 0;
-    for (let k = 1; k < numLanes; k++) {
-      if (laneFreeAt[k] < laneFreeAt[lane]) lane = k;
-    }
+  // The shared FIFO queue, as passenger indices with a head cursor (a cursor
+  // avoids O(n) Array.shift when the queue grows long).
+  const queue: number[] = [];
+  let queueHead = 0;
 
-    // The passenger cannot start before they arrive, nor before their lane is
-    // free. Whichever is later governs.
-    const serviceStart = Math.max(arrival, laneFreeAt[lane]);
-    const serviceEnd = serviceStart + serviceTimes[i];
-    laneFreeAt[lane] = serviceEnd;
+  let nextArrival = 0; // cursor into the arrival event list
 
-    passengers.push({
+  const startService = (i: number, lane: number, t: number) => {
+    const serviceEnd = t + serviceTimes[i];
+    completionAt[lane] = serviceEnd;
+    lanesBusy++;
+    passengers[i] = {
       id: i,
-      arrival,
-      serviceStart,
+      arrival: arrivals[i],
+      serviceStart: t,
       serviceEnd,
       lane,
-      wait: serviceStart - arrival,
-      timeInSystem: serviceEnd - arrival,
-    });
+      wait: t - arrivals[i],
+      timeInSystem: serviceEnd - arrivals[i],
+    };
+  };
+
+  while (nextArrival < n || lanesBusy > 0) {
+    // Earliest pending completion event (ties -> lowest lane index).
+    let completionLane = -1;
+    let completionTime = Infinity;
+    for (let k = 0; k < numLanes; k++) {
+      if (completionAt[k] < completionTime) {
+        completionTime = completionAt[k];
+        completionLane = k;
+      }
+    }
+
+    const arrivalTime = nextArrival < n ? arrivals[nextArrival] : Infinity;
+
+    if (completionTime <= arrivalTime) {
+      // COMPLETION EVENT: the lane frees; pull the head of the queue if any.
+      completionAt[completionLane] = Infinity;
+      lanesBusy--;
+      if (queueHead < queue.length) {
+        startService(queue[queueHead++], completionLane, completionTime);
+      }
+    } else {
+      // ARRIVAL EVENT: start immediately on the lowest-index idle lane, or
+      // join the tail of the shared queue.
+      const i = nextArrival++;
+      if (lanesBusy < numLanes && queueHead === queue.length) {
+        startService(i, completionAt.indexOf(Infinity), arrivalTime);
+      } else {
+        queue.push(i);
+      }
+    }
   }
 
   return passengers;
@@ -177,6 +237,11 @@ export function percentile(values: number[], p: number): number {
  * And for each bucket [t, t+res): the mean wait of passengers who ARRIVED in
  * that bucket — this is what reveals wait time climbing during a peak and then
  * recovering, which is the whole point of the visualization.
+ *
+ * The instantaneous counts come from a three-cursor sweep over the sorted
+ * arrival / service-start / service-end times: at any t, (arrivals so far) −
+ * (starts so far) is the queue and (arrivals so far) − (ends so far) is the
+ * system population. O(n log n) total instead of O(n · buckets).
  */
 function buildTimeSeries(
   passengers: Passenger[],
@@ -195,18 +260,25 @@ function buildTimeSeries(
     bucketCount[b] += 1;
   }
 
+  // Arrivals are already sorted; service starts and ends are not guaranteed to
+  // be (a later arrival can start on another lane before an earlier passenger
+  // finishes), so sort both.
+  const arrivalTimes = passengers.map((p) => p.arrival);
+  const startTimes = passengers.map((p) => p.serviceStart).sort((a, b) => a - b);
+  const endTimes = passengers.map((p) => p.serviceEnd).sort((a, b) => a - b);
+  let ai = 0; // count of arrivals with time <= t
+  let si = 0; // count of service starts with time <= t
+  let ei = 0; // count of service ends with time <= t
+
   for (let i = 0; i <= numBuckets; i++) {
     const t = i * resolution;
 
-    // Instantaneous counts at time t. Passengers are few thousand and buckets a
-    // few hundred, so an O(n) scan per sample is comfortably fast and obviously
-    // correct; a sweep-line optimization isn't worth the added complexity here.
-    let queueLength = 0;
-    let inSystem = 0;
-    for (const p of passengers) {
-      if (p.arrival <= t && p.serviceStart > t) queueLength++;
-      if (p.arrival <= t && p.serviceEnd > t) inSystem++;
-    }
+    while (ai < arrivalTimes.length && arrivalTimes[ai] <= t) ai++;
+    while (si < startTimes.length && startTimes[si] <= t) si++;
+    while (ei < endTimes.length && endTimes[ei] <= t) ei++;
+
+    const queueLength = ai - si;
+    const inSystem = ai - ei;
 
     const count = bucketCount[i] ?? 0;
     const avgWait = count > 0 ? bucketWaitSum[i] / count : 0;
@@ -226,7 +298,9 @@ function buildSummary(
   const n = passengers.length;
   if (n === 0) {
     return {
+      totalArrivals: 0,
       totalProcessed: 0,
+      stillInSystemAtHorizon: 0,
       avgWait: 0,
       p95Wait: 0,
       maxWait: 0,
@@ -236,15 +310,21 @@ function buildSummary(
     };
   }
 
+  const horizon = config.horizonMinutes;
+
+  // Wait statistics are computed over EVERY arrival, including passengers whose
+  // screening spills past the horizon — dropping them would understate exactly
+  // the congestion this tool exists to show.
   const waits = passengers.map((p) => p.wait);
   const avgWait = waits.reduce((a, b) => a + b, 0) / n;
   const avgTimeInSystem =
     passengers.reduce((a, p) => a + p.timeInSystem, 0) / n;
 
+  const totalProcessed = passengers.filter((p) => p.serviceEnd <= horizon).length;
+
   // Utilization = busy lane-minutes / total available lane-minutes over the
   // window. We only count service that falls within [0, horizon] so a job that
   // spills past the end of the window doesn't inflate the number.
-  const horizon = config.horizonMinutes;
   let busyLaneMinutes = 0;
   for (const p of passengers) {
     const start = Math.min(p.serviceStart, horizon);
@@ -259,7 +339,9 @@ function buildSummary(
   );
 
   return {
-    totalProcessed: n,
+    totalArrivals: n,
+    totalProcessed,
+    stillInSystemAtHorizon: n - totalProcessed,
     avgWait,
     p95Wait: percentile(waits, 95),
     maxWait: Math.max(...waits),
@@ -280,12 +362,15 @@ function buildSummary(
 export function runSimulation(config: SimConfig): SimResult {
   const rng = new Rng(config.seed);
 
-  const arrivals = generateArrivals(
+  let arrivals = generateArrivals(
     rng,
     config.arrivalProfile,
     config.horizonMinutes,
     config.volumeMultiplier,
   );
+
+  const capped = arrivals.length > config.maxPassengers;
+  if (capped) arrivals = arrivals.slice(0, config.maxPassengers);
 
   const serviceTimes = arrivals.map(() =>
     sampleServiceTime(rng, config.serviceMeanMinutes, config.serviceStdMinutes),
@@ -299,17 +384,18 @@ export function runSimulation(config: SimConfig): SimResult {
   );
   const summary = buildSummary(passengers, config, timeSeries);
 
-  return { config, passengers, timeSeries, summary };
+  return { config, passengers, timeSeries, summary, capped };
 }
 
 /** A sensible default configuration, also used as the UI's starting point. */
 export const DEFAULT_CONFIG: SimConfig = {
   horizonMinutes: 240, // 4-hour window
-  resolutionMinutes: 2,
+  resolutionMinutes: 1, // per-minute buckets for the output series
   numLanes: 6,
   arrivalProfile: 'morningPeak',
   volumeMultiplier: 1,
   serviceMeanMinutes: 0.6, // ~36s mean screening time per passenger
   serviceStdMinutes: 0.45, // right-skewed: many quick, some slow
   seed: 42,
+  maxPassengers: 20000,
 };

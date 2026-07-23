@@ -155,10 +155,8 @@ describe('runSimulation — end-to-end sanity & the non-linear lane effect', () 
   it('produces a coherent result set', () => {
     const r = runSimulation(base);
     expect(r.passengers.length).toBeGreaterThan(0);
-    expect(r.summary.totalProcessed).toBe(r.passengers.length);
-    // Utilization is a fraction.
-    expect(r.summary.avgUtilization).toBeGreaterThan(0);
-    expect(r.summary.avgUtilization).toBeLessThanOrEqual(1);
+    expect(r.summary.totalArrivals).toBe(r.passengers.length);
+    expect(r.summary.totalProcessed).toBeLessThanOrEqual(r.summary.totalArrivals);
     // p95 wait must be >= average wait by definition of the tail.
     expect(r.summary.p95Wait).toBeGreaterThanOrEqual(r.summary.avgWait);
     // Time series is sampled across the full window.
@@ -166,6 +164,50 @@ describe('runSimulation — end-to-end sanity & the non-linear lane effect', () 
     expect(r.timeSeries[r.timeSeries.length - 1].t).toBeGreaterThanOrEqual(
       base.horizonMinutes,
     );
+  });
+
+  it('utilization never exceeds 1, across profiles, loads and lane counts', () => {
+    // A lane cannot be more than 100% busy no matter how overloaded the
+    // checkpoint gets — only service INSIDE the window counts as busy time.
+    for (const arrivalProfile of ['steady', 'morningPeak', 'bimodal'] as const) {
+      for (const volumeMultiplier of [0.5, 1, 3]) {
+        for (const numLanes of [1, 2, 8]) {
+          const r = runSimulation({
+            ...base,
+            arrivalProfile,
+            volumeMultiplier,
+            numLanes,
+          });
+          expect(r.summary.avgUtilization).toBeGreaterThanOrEqual(0);
+          expect(r.summary.avgUtilization).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+  });
+
+  it('conservation: processed + still in system at horizon = total arrivals', () => {
+    // Nobody is created or destroyed by the model. Every arrival either
+    // finished screening inside the window or is still queued/in-service when
+    // the window closes. An overloaded config makes the check meaningful —
+    // plenty of passengers must actually be left over at the horizon.
+    for (const seed of [1, 42, 99]) {
+      const r = runSimulation({ ...base, seed, numLanes: 2, volumeMultiplier: 1.5 });
+      const leftOver = r.passengers.filter(
+        (p) => p.serviceEnd > base.horizonMinutes,
+      ).length;
+      expect(r.summary.stillInSystemAtHorizon).toBe(leftOver);
+      expect(
+        r.summary.totalProcessed + r.summary.stillInSystemAtHorizon,
+      ).toBe(r.summary.totalArrivals);
+    }
+  });
+
+  it('caps the number of simulated passengers and flags the truncation', () => {
+    const r = runSimulation({ ...base, maxPassengers: 100, volumeMultiplier: 2 });
+    expect(r.capped).toBe(true);
+    expect(r.passengers.length).toBe(100);
+    const uncapped = runSimulation(base);
+    expect(uncapped.capped).toBe(false);
   });
 
   it('THE "AHA": adding lanes during a peak collapses wait non-linearly', () => {
