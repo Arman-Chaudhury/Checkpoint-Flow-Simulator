@@ -68,10 +68,16 @@ function bump(t: number, center: number, width: number, height: number): number 
  *    daily volume (~900+/hour here), and minute-level arrivals inside a
  *    departure bank crest above that hourly average — hence the morning bank
  *    peaking near 20 pax/min over a quieter ~6 pax/min shoulder.
- *  - Seasonality is left to the volume multiplier: July 2024, the region's
- *    busiest-ever month at 13.7M passengers, ran ~9% above an average 2024
- *    month — i.e. a ×1.1 setting. The slider's upper range covers holiday
- *    surges and growth scenarios.
+ *  - Seasonality is left to the volume multiplier: LGA's peak month runs
+ *    ~9–10% above its average month (July 2024, and again August 2025 in the
+ *    following year's report) — i.e. a ×1.1 setting. The slider's upper range
+ *    covers holiday surges and growth scenarios.
+ *  - 2024 is the deliberate anchor year: it was the record year (145.9M
+ *    regionwide), which makes it the natural design load — staffing models
+ *    should be sized against the busiest realistic demand, not a lull. The
+ *    2025 ATR (published April 2026) confirms the baseline held: Terminal C
+ *    departures came in at 7.04M, within 0.1% of the 2024 figure, even as
+ *    regional traffic dipped to 142.7M on EWR's runway rehabilitation.
  *
  * Shapes:
  *  - steady:      flat demand — a well-spread schedule at the daily average.

@@ -35,9 +35,17 @@ checkpoint. Spread over a ~17.5-hour operating day that averages ~9
 passengers/minute (the steady baseline), and with the standard planning
 assumption that the design peak hour carries 9–10% of daily volume, the
 morning bank crests near 20 passengers/minute. Seasonality maps onto the
-volume slider: July 2024, the region's busiest month on record (13.7M
-passengers), ran about 9% above an average month — a ×1.1 setting. The full
-derivation is documented in `src/simulation/arrivals.ts`.
+volume slider: LGA's peak month runs about 9–10% above its average month — a
+×1.1 setting.
+
+I anchored the calibration to 2024 deliberately: it was the record year (145.9
+million passengers regionwide), and a staffing model should be sized against
+the busiest realistic demand — the design load — not an off year. The 2025
+edition of the report validates that choice: even as regional traffic eased to
+142.7 million during Newark's runway rehabilitation, Terminal C's departing
+volume held within 0.1% of the 2024 figure, and the region set a new
+single-month record (13.8 million, August 2025). The full derivation is
+documented in `src/simulation/arrivals.ts`.
 
 **Lognormal service times.** Most passengers clear screening quickly and
 consistently; a meaningful few take far longer — the forgotten laptop, the bag
