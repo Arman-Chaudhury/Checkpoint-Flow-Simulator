@@ -25,6 +25,20 @@ algorithm, which is exact — no discretization of time into buckets. Three
 built-in profiles (steady, single morning bank, bimodal) plus a volume
 multiplier cover the interesting demand shapes.
 
+**Calibrated to real traffic data.** The profile magnitudes are derived from
+the Port Authority of NY & NJ's [2024 Annual Airport Traffic
+Report](https://www.panynj.gov/airports/en/statistics-general-info.html). The
+modeled facility is a mid-size checkpoint handling about half of a terminal
+like LaGuardia's Terminal C, which the report puts at ~7.03 million departing
+passengers in 2024 — roughly 19,200 per day, so ~9,600/day through this
+checkpoint. Spread over a ~17.5-hour operating day that averages ~9
+passengers/minute (the steady baseline), and with the standard planning
+assumption that the design peak hour carries 9–10% of daily volume, the
+morning bank crests near 20 passengers/minute. Seasonality maps onto the
+volume slider: July 2024, the region's busiest month on record (13.7M
+passengers), ran about 9% above an average month — a ×1.1 setting. The full
+derivation is documented in `src/simulation/arrivals.ts`.
+
 **Lognormal service times.** Most passengers clear screening quickly and
 consistently; a meaningful few take far longer — the forgotten laptop, the bag
 search, the pat-down. Screening time is therefore right-skewed, which a normal
@@ -66,5 +80,9 @@ npm run build   # production build
   and the scenario comparison is apples to apples on the same draw.
 - **Truncation cap.** Extreme settings cap the run at 20,000 passengers to keep
   the browser responsive; the UI flags when a run was truncated.
+- **Calibration is scale, not schedule.** The Port Authority data pins the
+  realistic *magnitude* of demand (passengers per day through a checkpoint);
+  the minute-by-minute *shape* of each profile is a modeling choice, since
+  published statistics are monthly, not per-minute.
 
 MIT licensed.

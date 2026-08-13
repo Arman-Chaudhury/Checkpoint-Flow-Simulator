@@ -55,10 +55,29 @@ function bump(t: number, center: number, width: number, height: number): number 
  * The instantaneous arrival rate (passengers/min) for a profile at time `t`
  * (minutes from the start of the window), before the volume multiplier.
  *
- * These shapes are illustrative but chosen to be operationally realistic:
- *  - steady:      flat demand.
- *  - morningPeak: low baseline with one tall, narrow bank ~45 min in.
- *  - bimodal:     two banks (morning + early afternoon) over a longer window.
+ * CALIBRATION — the magnitudes are derived from the Port Authority of NY & NJ
+ * 2024 Annual Airport Traffic Report (panynj.gov, Airport Traffic Statistics):
+ *
+ *  - The modeled facility is one mid-size checkpoint handling roughly half of
+ *    a terminal like LaGuardia's Terminal C. ATR table 2.5.1 puts Terminal C
+ *    at 13.99M passengers in 2024, of which ~7.03M departing (outbound) —
+ *    about 19,200 departures/day, so ~9,600/day through this checkpoint.
+ *  - Spread over a ~17.5-hour operating day that is ~9 pax/min on average,
+ *    which sets the `steady` baseline.
+ *  - Airports plan staffing around a design peak hour of roughly 9–10% of
+ *    daily volume (~900+/hour here), and minute-level arrivals inside a
+ *    departure bank crest above that hourly average — hence the morning bank
+ *    peaking near 20 pax/min over a quieter ~6 pax/min shoulder.
+ *  - Seasonality is left to the volume multiplier: July 2024, the region's
+ *    busiest-ever month at 13.7M passengers, ran ~9% above an average 2024
+ *    month — i.e. a ×1.1 setting. The slider's upper range covers holiday
+ *    surges and growth scenarios.
+ *
+ * Shapes:
+ *  - steady:      flat demand — a well-spread schedule at the daily average.
+ *  - morningPeak: quiet shoulder plus one tall bank (~1.5 h wide) a fifth of
+ *                 the way into the window.
+ *  - bimodal:     morning bank + slightly smaller afternoon bank.
  *
  * `horizon` lets the peaks scale to the configured window length so the shape
  * stays sensible whether the user simulates 2 hours or 6.
@@ -70,19 +89,20 @@ export function baseArrivalRate(
 ): number {
   switch (profile) {
     case 'steady':
-      return 6; // ~6 pax/min ≈ 360 pax/hour of steady demand.
+      return 9; // ~9 pax/min ≈ 540 pax/hour — the calibrated all-day average.
 
     case 'morningPeak': {
-      // Low background traffic plus one sharp bank about a fifth of the way in.
-      const baseline = 1.5;
-      const peak = bump(t, horizon * 0.22, horizon * 0.06, 22);
+      // Off-peak shoulder traffic plus one departure bank about a fifth of
+      // the way in, cresting near the calibrated ~20 pax/min.
+      const baseline = 6;
+      const peak = bump(t, horizon * 0.22, horizon * 0.075, 14);
       return baseline + peak;
     }
 
     case 'bimodal': {
-      const baseline = 1.5;
-      const morning = bump(t, horizon * 0.22, horizon * 0.06, 16);
-      const afternoon = bump(t, horizon * 0.68, horizon * 0.07, 13);
+      const baseline = 5;
+      const morning = bump(t, horizon * 0.22, horizon * 0.06, 13);
+      const afternoon = bump(t, horizon * 0.68, horizon * 0.07, 10);
       return baseline + morning + afternoon;
     }
   }
